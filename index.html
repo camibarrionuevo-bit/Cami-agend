@@ -100,6 +100,8 @@
   }
   .day-cell.outside{ opacity:.35; }
   .day-cell.today{ border-color:var(--accent); border-width:1.5px; }
+  .day-cell.selected{ background:var(--accent); border-color:var(--accent); }
+  .day-cell.selected .num{ color:#fff; }
   .day-cell .num{ font-size:13px; font-weight:600; }
   .day-cell .dots{ display:flex; gap:2px; margin-top:4px; flex-wrap:wrap; justify-content:center; }
   .dot{ width:5px; height:5px; border-radius:50%; background:var(--accent); }
@@ -451,6 +453,7 @@
       <div class="modal-actions" id="editActions" style="display:none;">
         <button type="button" class="warn-btn" id="toggleSkipBtn">Segna come non venuto</button>
         <button type="button" id="togglePaymentBtn">Segna come pagato in contanti</button>
+        <button type="button" id="duplicateBtn">Duplica su altre date</button>
         <button type="button" id="deleteOccurrenceBtn">Elimina questa data</button>
         <button type="button" id="stopRecurrenceBtn" style="display:none;">Interrompi da questa data (mantiene lo storico)</button>
         <button type="button" class="danger-btn" id="deleteSeriesBtn" style="display:none;">Elimina intera serie (anche lo storico)</button>
@@ -489,6 +492,33 @@
         <button type="button" class="small-btn" id="addLocConfirmBtn" style="width:100%; margin-top:10px; padding:9px;">Aggiungi luogo</button>
       </div>
       <button class="save-btn" id="savePatientBtn">Salva paziente</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL: DUPLICATE APPOINTMENT -->
+<div class="overlay" id="duplicateOverlay" style="z-index:25;">
+  <div class="sheet">
+    <div class="sheet-handle"><span></span></div>
+    <div class="sheet-header">
+      <h2 id="duplicateModalTitle">Duplica appuntamento</h2>
+      <button class="sheet-close" id="duplicateModalClose">&times;</button>
+    </div>
+    <div class="sheet-body">
+      <div class="hint-box" id="duplicateInfoBox"></div>
+      <div class="period-row" style="margin-bottom:8px;">
+        <div class="period-nav">
+          <button class="icon-btn" id="dupPrevBtn">&#8249;</button>
+          <div class="period-label" id="dupPeriodLabel">—</div>
+          <button class="icon-btn" id="dupNextBtn">&#8250;</button>
+        </div>
+      </div>
+      <div class="month-weekdays">
+        <span>L</span><span>M</span><span>M</span><span>G</span><span>V</span><span>S</span><span>D</span>
+      </div>
+      <div class="month-grid" id="dupMonthGrid"></div>
+      <div style="font-size:12px; color:var(--text-soft); padding:8px 4px 0;">Tocca i giorni su cui copiare l'appuntamento. Puoi selezionarne più di uno, anche su mesi diversi.</div>
+      <button class="save-btn" id="dupConfirmBtn" style="margin-top:14px;">Duplica</button>
     </div>
   </div>
 </div>
@@ -690,10 +720,12 @@
    'suggestStrip','suggestStripText','suggestStripUse','apptDate','apptStart','apptEnd',
    'recurrenceSeg','recurrenceEndField','recurrenceEndSelect','recurrenceEndDate',
    'weekdayHint','sessionTypeSeg','apptNotes','editHintBox','apptSaveBtn','editActions',
-   'toggleSkipBtn','togglePaymentBtn','deleteOccurrenceBtn','stopRecurrenceBtn','deleteSeriesBtn',
+   'toggleSkipBtn','togglePaymentBtn','duplicateBtn','deleteOccurrenceBtn','stopRecurrenceBtn','deleteSeriesBtn',
    'patientOverlay','patientModalTitle','patientModalClose','patientNameInput','patientDobInput','locGrid',
    'newLocForm','newLocName','colorSwatches','newLocColorCustom','addLocConfirmBtn','savePatientBtn',
-   'birthdayBanner'
+   'birthdayBanner',
+   'duplicateOverlay','duplicateModalTitle','duplicateModalClose','duplicateInfoBox',
+   'dupPrevBtn','dupNextBtn','dupPeriodLabel','dupMonthGrid','dupConfirmBtn'
   ].forEach(function(id){ el[id] = document.getElementById(id); });
 
   // ---------- TAB SWITCHING ----------
@@ -1500,7 +1532,111 @@
     if (activeTab === 'agenda') renderAgenda();
   });
 
-  // ---------- BIRTHDAYS ----------
+  // ---------- DUPLICATE APPOINTMENT ----------
+  var duplicateSourceSeries = null;
+  var dupFocus = todayDate();
+  var dupSelectedDates = {};
+
+  el.duplicateBtn.addEventListener('click', function(){
+    if (!editingSeriesId) return;
+    var s = state.series.find(function(x){ return x.id === editingSeriesId; });
+    if (!s) return;
+    duplicateSourceSeries = s;
+    dupSelectedDates = {};
+    dupFocus = editingDate ? parseISO(editingDate) : parseISO(s.startDate);
+    var typeLabel = (s.sessionType === 'valutazione') ? ' · valutazione' : '';
+    el.duplicateInfoBox.textContent = 'Stai duplicando: ' + patientName(s.patientId) + ', ' + s.startTime + '–' + s.endTime + typeLabel;
+    renderDupMonth();
+    el.duplicateOverlay.classList.add('open');
+  });
+  function closeDuplicateModal(){ el.duplicateOverlay.classList.remove('open'); }
+  el.duplicateModalClose.addEventListener('click', closeDuplicateModal);
+  el.duplicateOverlay.addEventListener('click', function(e){ if (e.target === el.duplicateOverlay) closeDuplicateModal(); });
+
+  el.dupPrevBtn.addEventListener('click', function(){
+    dupFocus = new Date(dupFocus.getFullYear(), dupFocus.getMonth()-1, 1);
+    renderDupMonth();
+  });
+  el.dupNextBtn.addEventListener('click', function(){
+    dupFocus = new Date(dupFocus.getFullYear(), dupFocus.getMonth()+1, 1);
+    renderDupMonth();
+  });
+
+  function renderDupMonth(){
+    var y = dupFocus.getFullYear(), m = dupFocus.getMonth();
+    el.dupPeriodLabel.textContent = MONTH_NAMES[m] + ' ' + y;
+    var first = new Date(y, m, 1);
+    var gridStart = startOfWeek(first);
+    var last = endOfMonth(first);
+    var gridEnd = addDays(startOfWeek(last), 6);
+    var occ = allOccurrencesInRange(gridStart, gridEnd);
+    var byDate = {};
+    occ.forEach(function(o){ (byDate[o.date] = byDate[o.date] || []).push(o); });
+    var today = todayDate();
+
+    var html = '';
+    var cursor = new Date(gridStart);
+    while (cursor <= gridEnd){
+      var iso = toISO(cursor);
+      var isOutside = cursor.getMonth() !== m;
+      var isToday = sameDate(cursor, today);
+      var isSelected = !!dupSelectedDates[iso];
+      var dayOcc = byDate[iso] || [];
+      var dotsHtml = '';
+      dayOcc.slice(0,4).forEach(function(o){
+        var loc = patientLocation(o.patientId);
+        var col = o.skipped ? 'var(--warn)' : (loc ? loc.color : 'var(--accent)');
+        dotsHtml += '<span class="dot" style="background:'+col+'"></span>';
+      });
+      html += '<div class="day-cell'+(isOutside?' outside':'')+(isToday?' today':'')+(isSelected?' selected':'')+'" data-date="'+iso+'">'+
+                '<div class="num">'+cursor.getDate()+'</div>'+
+                '<div class="dots">'+dotsHtml+'</div>'+
+              '</div>';
+      cursor = addDays(cursor, 1);
+    }
+    el.dupMonthGrid.innerHTML = html;
+    el.dupMonthGrid.querySelectorAll('.day-cell').forEach(function(cell){
+      cell.addEventListener('click', function(){
+        var iso = cell.getAttribute('data-date');
+        if (dupSelectedDates[iso]) delete dupSelectedDates[iso];
+        else dupSelectedDates[iso] = true;
+        cell.classList.toggle('selected');
+      });
+    });
+  }
+
+  el.dupConfirmBtn.addEventListener('click', function(){
+    var dates = Object.keys(dupSelectedDates);
+    if (!dates.length){ alert('Seleziona almeno un giorno.'); return; }
+    if (!duplicateSourceSeries) return;
+    var s = duplicateSourceSeries;
+    var created = 0;
+    var conflictDates = [];
+    dates.sort();
+    dates.forEach(function(iso){
+      var candidate = {
+        patientId: s.patientId, startDate: iso, startTime: s.startTime, endTime: s.endTime,
+        notes: s.notes, recurrence: 'none', recurrenceEnd: null, sessionType: s.sessionType || 'trattamento'
+      };
+      var conflict = findConflict(candidate, null);
+      if (conflict){
+        conflictDates.push(formatDateShort(parseISO(iso)));
+      } else {
+        candidate.id = uid('ser');
+        state.series.push(candidate);
+        created++;
+      }
+    });
+    if (created > 0) saveState();
+    closeDuplicateModal();
+    closeModal();
+    if (activeTab === 'agenda') renderAgenda();
+    var msg = 'Duplicato su ' + created + (created === 1 ? ' giorno.' : ' giorni.');
+    if (conflictDates.length) msg += ' Saltati per sovrapposizione oraria: ' + conflictDates.join(', ') + '.';
+    alert(msg);
+  });
+
+
   function todaysBirthdays(){
     var t = todayDate();
     return state.patients.filter(function(p){
